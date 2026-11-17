@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Football Value Analyzer</title>
+<style>
+:root{--bg:#0f1a22;--card:#18262f;--line:#2a3c48;--tx:#e9eef2;--mut:#8fa3b0;--val:#f2b134;--bad:#ff7b6b;color-scheme:dark}
+@media(prefers-color-scheme:light){:root{--bg:#eef2f5;--card:#fff;--line:#d3dde4;--tx:#13222d;--mut:#586b78;--val:#a86b00;--bad:#b3261e;color-scheme:light}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 system-ui,sans-serif;padding:16px;max-width:720px;margin-inline:auto}
+h1{font-size:1.4rem;margin:4px 0 14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+label{display:flex;flex-direction:column;font-size:.85rem;color:var(--mut);gap:4px;flex:1;min-width:140px}
+input,select{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:1rem;width:100%}
+button{width:100%;background:var(--val);color:#1a1200;border:0;border-radius:10px;padding:16px;font-size:1.1rem;font-weight:700}
+button:disabled{opacity:.6}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--tx);outline-offset:2px}
+#st{margin:12px 0;color:var(--mut);font-size:.9rem}
+#st.err{color:var(--bad);font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}
+.card.v{border-left:5px solid var(--val)}
+.top{display:flex;justify-content:space-between;gap:8px;font-size:.8rem;color:var(--mut)}
+.pick{font-size:1.15rem;font-weight:700;margin:4px 0}
+.game{color:var(--mut);font-size:.95rem}
+.nums{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:.9rem}
+.nums b{display:block;font-size:1.05rem}
+.edge{color:var(--val)}
+h2{font-size:1.05rem;margin:18px 0 8px}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>Football Value Analyzer</h1>
+<div class="row">
+  <label>Chave The Odds API (guardada só neste aparelho)<input id="key" type="password" autocomplete="off" placeholder="Cola a chave aqui uma vez"></label>
+  <label>Banca (€)<input id="bank" type="number" inputmode="decimal" value="50"></label>
+  <label>Ligas a analisar<select id="modo"><option value="6">Principais (até 6 créditos)</option><option value="15">Até 15 ligas</option><option value="99" selected>Todas com jogos</option></select></label>
+  <label>Mercados<select id="merc"><option value="h2h">Resultado (1 crédito/liga)</option><option value="h2h,totals">Resultado e golos (2/liga)</option><option value="h2h,totals,spreads" selected>Resultado, golos e handicaps (3/liga)</option></select></label>
+  <label>Mercados extra por jogo<select id="extra"><option value="">Nenhum</option><option value="bdd">Ambas marcam, dupla hipótese, empate anula (3 créditos/jogo)</option><option value="bddcc" selected>Esses mais cantos e cartões (5 créditos/jogo)</option></select></label>
+  <label>Jogos com extras<select id="nx"><option value="5" selected>5 jogos</option><option value="10">10 jogos</option></select></label>
+  <label>Odd mínima<input id="omin" type="number" step="0.05" inputmode="decimal" value="1.65"></label>
+  <label>Odd máxima<input id="omax" type="number" step="0.05" inputmode="decimal" value="2.10"></label>
+</div>
+<button id="go">Analisar jogos</button>
+<div id="st"></div>
+<div id="out"></div>
+<small id="note"></small>
+
+<script>
+const $=id=>document.getElementById(id);
+let restantes=null;
+const PRIO=["soccer_portugal_primeira_liga","soccer_epl","soccer_spain_la_liga","soccer_italy_serie_a","soccer_germany_bundesliga","soccer_france_ligue_one","soccer_uefa_champs_league","soccer_uefa_europa_league","soccer_netherlands_eredivisie","soccer_efl_champ","soccer_uefa_europa_conference_league","soccer_belgium_first_div"];
+const MIN_EDGE=0.01, HORAS=72;
+
+function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+$("key").value=store("oddsKey")||"";
+$("bank").value=store("bank")||"50";
+$("omin").value=store("omin")||"1.65";
+$("omax").value=store("omax")||"2.10";
+
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function status(t,err){const s=$("st");s.textContent=t;s.className=err?"err":""}
+
+async function api(path,key){
+  const r=await fetch("https://api.the-odds-api.com/v4"+path+(path.includes("?")?"&":"?")+"apiKey="+encodeURIComponent(key));
+  const rem=r.headers.get("x-requests-remaining");
+  if(rem!==null)restantes=parseInt(rem,10);
+  if(rem!==null)$("note").textContent="Créditos restantes na API: "+rem;
+  if(!r.ok){let m="";try{m=(await r.json()).message}catch(e){}
+    const e=new Error(m||("Erro "+r.status));e.status=r.status;throw e}
+  return r.json();
+}
+
+const MERC={h2h:"Resultado",totals:"Golos",spreads:"Handicap",btts:"Ambas marcam",double_chance:"Dupla hipótese",draw_no_bet:"Empate anula",alternate_totals_corners:"Cantos",alternate_totals_cards:"Cartões"};
+const XM={bdd:"btts,double_chance,draw_no_bet",bddcc:"btts,double_chance,draw_no_bet,alternate_totals_corners,alternate_totals_cards"};
+function rotulo(m,n,pt){
+  const ou=n==="Over"?"Mais de ":"Menos de ";
+  if(m==="h2h")return n==="Draw"?"Empate":n;
+  if(m==="totals")return ou+pt+" golos";
+  if(m==="alternate_totals_corners")return ou+pt+" cantos";
+  if(m==="alternate_totals_cards")return ou+pt+" cartões";
+  if(m==="btts")return "Ambas marcam: "+(n==="Yes"?"Sim":"Não");
+  if(m==="double_chance")return n.replace(" or "," ou ").replace("Draw","Empate");
+  if(m==="draw_no_bet")return n+" (empate anula)";
+  return n+" "+(pt>0?"+":"")+pt;
+}
+function analisarJogo(ev){
+  const mapa={};
+  for(const b of ev.bookmakers||[]){
+    for(const m of b.markets||[]){
+      const g={};
+      (m.outcomes||[]).forEach(x=>{
+        const gk=x.point===undefined?"":(m.key.includes("spreads")?Math.abs(x.point):x.point);
+        (g[gk]=g[gk]||[]).push(x);
+      });
+      for(const o of Object.values(g)){
+        if(o.length<2||o.length>3)continue;
+        const f=m.key==="double_chance"?2:1;
+        const imp=o.map(x=>1/x.price), tot=imp.reduce((a,c)=>a+c,0);
+        o.forEach((x,i)=>{
+          const k=m.key+"|"+x.name+"|"+(x.point===undefined?"":x.point);
+          const e=mapa[k]||(mapa[k]={m:m.key,n:x.name,pt:x.point,ps:[],best:null});
+          e.ps.push(imp[i]/tot*f);
+          if(!e.best||x.price>e.best.odd)e.best={odd:x.price,nome:b.title};
+        });
+      }
+    }
+  }
+  return Object.values(mapa).filter(e=>e.ps.length>=3).map(e=>{
+    const fair=e.ps.reduce((a,c)=>a+c,0)/e.ps.length;
+    return {jogo:ev.home_team+" vs "+ev.away_team,hora:ev.commence_time,mercado:MERC[e.m]||e.m,
+      pick:rotulo(e.m,e.n,e.pt),odd:e.best.odd,casa:e.best.nome,fair,edge:e.best.odd*fair-1,n:e.ps.length};
+  });
+}
+
+function card(c,bank,valor){
+  const k=(c.fair*c.odd-1)/(c.odd-1);
+  const stake=Math.max(0,Math.round(bank*Math.min(k*0.25,0.05)*2)/2);
+  const d=new Date(c.hora).toLocaleString("pt-PT",{weekday:"short",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+  return `<div class="card${valor?" v":""}"><div class="top"><span>${esc(c.liga+" – "+c.mercado)}</span><span>${esc(d)}</span></div>
+  <div class="pick">${esc(c.pick)} @ ${c.odd.toFixed(2)}</div><div class="game">${esc(c.jogo)}</div>
+  <div class="nums"><span>Casa<b>${esc(c.casa)}</b></span><span>Prob. justa<b>${(c.fair*100).toFixed(0)}%</b></span>
+  <span>Valor<b class="edge">${(c.edge*100>=0?"+":"")+(c.edge*100).toFixed(1)}%</b></span>
+  ${valor&&stake>0?`<span>Stake sugerida<b>${stake.toFixed(2)} €</b></span>`:""}</div></div>`;
+}
+
+$("go").onclick=async()=>{
+  const key=$("key").value.trim(), bank=parseFloat($("bank").value)||50;
+  if(!key){status("Cola primeiro a tua chave da The Odds API.",true);return}
+  const omin=parseFloat($("omin").value)||1.65, omax=parseFloat($("omax").value)||2.1;
+  store("omin",String(omin));store("omax",String(omax));store("oddsKey",key);store("bank",String(bank));
+  $("go").disabled=true;$("out").innerHTML="";
+  try{
+    status("A analisar jogos…");
+    const sports=await api("/sports/",key);
+    const ativos=sports.filter(s=>s.key.startsWith("soccer_")&&s.active&&!s.has_outrights);
+    const agora=Date.now(), lim=agora+HORAS*3600e3;
+    let proximo=null;const com=[];
+    const pausa=ms=>new Promise(r=>setTimeout(r,ms));
+    for(let i=0;i<ativos.length;i++){
+      const s=ativos[i];
+      status("A procurar jogos… "+(i+1)+"/"+ativos.length);
+      let evs;
+      try{evs=await api("/sports/"+s.key+"/events/",key)}
+      catch(e){
+        if(e.status===401)throw e;
+        if(e.status===429){await pausa(2500);try{evs=await api("/sports/"+s.key+"/events/",key)}catch(e2){throw e2}}
+        else continue;
+      }
+      const fut=evs.map(x=>new Date(x.commence_time).getTime()).filter(t=>t>agora);
+      if(fut.length){const m=Math.min(...fut);if(!proximo||m<proximo)proximo=m}
+      const n=fut.filter(t=>t<=lim).length;
+      if(n)com.push({key:s.key,title:s.title,n});
+      await pausa(250);
+    }
+    com.sort((a,b)=>{const pa=PRIO.indexOf(a.key),pb=PRIO.indexOf(b.key);return (pa<0?99:pa)-(pb<0?99:pb)||b.n-a.n});
+    let lista=com.slice(0,Number($("modo").value)).map(c=>c.key);
+    if(!lista.length){
+      const q=proximo?new Date(proximo).toLocaleString("pt-PT",{weekday:"long",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"sem data";
+      status("Não há jogos de futebol nas próximas "+HORAS+" horas em nenhuma das "+ativos.length+" ligas ativas. Próximo jogo: "+q+".",true);return}
+    const mk=$("merc").value, nm=mk.split(",").length;
+    if(restantes!==null){
+      const max=Math.max(0,Math.floor((restantes-10)/nm));
+      if(max<lista.length)lista=lista.slice(0,max);
+      if(!lista.length){status("Créditos quase esgotados ("+restantes+"). Espera pela renovação mensal ou usa outra chave.",true);return}
+    }
+    let todos=[],jogos=0;const eventos=[];
+    for(const k of lista){
+      const nome=com.find(c=>c.key===k).title;
+      await pausa(300);
+      status("A analisar "+nome+"…");
+      let evs;
+      try{evs=await api("/sports/"+k+"/odds/?regions=eu&markets="+mk+"&oddsFormat=decimal",key)}
+      catch(e){if(e.status===401||e.status===429)throw e;continue}
+      for(const ev of evs){
+        const t=new Date(ev.commence_time).getTime();
+        if(t<agora||t>lim)continue;
+        const r=analisarJogo(ev);
+        if(r.length){jogos++;r.forEach(x=>{x.liga=nome;todos.push(x)})}
+        eventos.push({id:ev.id,sport:k,nome,t,n:(ev.bookmakers||[]).length});
+      }
+    }
+    const xm=XM[$("extra").value];
+    let nExtra=0,erroExtra=false;
+    if(xm){
+      const nmx=xm.split(",").length;
+      let n=Number($("nx").value);
+      if(restantes!==null)n=Math.min(n,Math.max(0,Math.floor((restantes-10)/nmx)));
+      const esc2=eventos.filter(e=>e.n>=3).sort((a,b)=>b.n-a.n||a.t-b.t).slice(0,n);
+      for(let i=0;i<esc2.length;i++){
+        const e=esc2[i];
+        status("A analisar mercados extra… "+(i+1)+"/"+esc2.length);
+        await pausa(300);
+        try{
+          const ev=await api("/sports/"+e.sport+"/events/"+e.id+"/odds?regions=eu&markets="+xm+"&oddsFormat=decimal",key);
+          const r=analisarJogo(ev);
+          if(r.length){nExtra++;r.forEach(x=>{x.liga=e.nome;todos.push(x)})}
+        }catch(err){if(err.status===401||err.status===429)throw err;erroExtra=true}
+      }
+    }
+    const extraTxt=xm?(" Mercados extra em "+nExtra+" jogos."+(erroExtra?" Alguns não estavam disponíveis.":"")):"";
+    const bons=todos.filter(c=>c.edge>=MIN_EDGE&&c.odd>=omin&&c.odd<=omax).sort((a,b)=>b.fair-a.fair);
+    let html="";
+    if(bons.length){
+      html+="<h2>Apostas de valor ("+bons.length+")</h2>"+bons.slice(0,12).map(c=>card(c,bank,true)).join("");
+      status("Analisados "+jogos+" jogos nas próximas "+HORAS+" horas."+extraTxt);
+    }else{
+      const perto=todos.filter(c=>c.odd>=omin&&c.odd<=omax).sort((a,b)=>b.edge-a.edge).slice(0,5);
+      status(jogos?("Analisados "+jogos+" jogos: nenhum tem valor claro agora. Estas são as mais próximas."+extraTxt):"Não há jogos com odds nas próximas "+HORAS+" horas (pausa de competições?).",!jogos);
+      if(perto.length)html+="<h2>Mais próximas de valor</h2>"+perto.map(c=>card(c,bank,false)).join("");
+    }
+    $("out").innerHTML=html;
+  }catch(e){
+    if(e.status===401)status("Chave inválida ou revogada. Cria uma nova em the-odds-api.com e cola-a acima.",true);
+    else if(e.status===429)status("Sem créditos ou demasiados pedidos. Espera um pouco ou verifica o teu plano.",true);
+    else status("Não foi possível ligar à API: "+e.message,true);
+  }finally{$("go").disabled=false}
+};
+</script>
+</body>
+</html>
